@@ -1,11 +1,11 @@
 # pylint: disable=unidiomatic-typecheck
+import sys
 from ast import (AsyncFunctionDef, Attribute, ClassDef, DictComp, Eq,
                  ExceptHandler, FunctionDef, GeneratorExp, Global, Gt, GtE,
-                 Import, ImportFrom, Lambda, ListComp, Load, Lt, LtE, Module,
-                 Name, NameConstant, Nonlocal, NotEq, Num, SetComp, Store, Str,
-                 Try, arg)
+                 Import, ImportFrom, Lambda, ListComp, Load, Lt, LtE, Match,
+                 Module, Name, NameConstant, Nonlocal, NotEq, Num, SetComp,
+                 Store, Str, Try, arg)
 from itertools import count
-import sys
 from token import NAME, OP
 from tokenize import tokenize
 
@@ -13,20 +13,30 @@ from .node import ATTRIBUTE, IMPORTED, PARAMETER_UNUSED, SELF, Node
 from .util import debug_time
 
 # Node types which introduce a new scope
-BLOCKS = (Module, FunctionDef, AsyncFunctionDef, ClassDef, ListComp, DictComp,
-          SetComp, GeneratorExp, Lambda)
+BLOCKS = (
+    Module,
+    FunctionDef,
+    AsyncFunctionDef,
+    ClassDef,
+    ListComp,
+    DictComp,
+    SetComp,
+    GeneratorExp,
+    Lambda,
+)
 FUNCTION_BLOCKS = (FunctionDef, Lambda, AsyncFunctionDef)
 # Node types which don't require any action
 if sys.version_info < (3, 8):
     SKIP = (NameConstant, Str, Num)
 else:
-    from ast import Constant # pylint: disable=ungrouped-imports
+    from ast import Constant  # pylint: disable=ungrouped-imports
+
     SKIP = (Constant,)
 SKIP += (Store, Load, Eq, Lt, Gt, NotEq, LtE, GtE)
 
 
 def tokenize_lines(lines):
-    return tokenize(((line + '\n').encode('utf-8') for line in lines).__next__)
+    return tokenize(((line + "\n").encode("utf-8") for line in lines).__next__)
 
 
 def advance(tokens, s=None, type=NAME):
@@ -84,6 +94,8 @@ class Visitor:
             return
         if type_ in SKIP:
             return
+        if type_ is Match:
+            self._visit_match(node)
         if type_ is Try:
             self._visit_try(node)
         elif type_ is ExceptHandler:
@@ -97,7 +109,7 @@ class Visitor:
         elif type_ in (ListComp, SetComp, DictComp, GeneratorExp):
             self._visit_comp(node)
         elif type_ in (Global, Nonlocal):
-            keyword = 'global' if type_ is Global else 'nonlocal'
+            keyword = "global" if type_ is Global else "nonlocal"
             self._visit_global_nonlocal(node, keyword)
         if type_ in (FunctionDef, ClassDef, AsyncFunctionDef):
             self._visit_class_function_definition(node)
@@ -132,14 +144,16 @@ class Visitor:
             self._iter_node(node)
 
     def _new_name(self, node):
-        self.nodes.append(Node(
-            node.id,
-            node.lineno,
-            node.col_offset,
-            self._cur_env,
-            # Using __dict__.get() is faster than getattr()
-            node.__dict__.get('_target'),
-        ))
+        self.nodes.append(
+            Node(
+                node.id,
+                node.lineno,
+                node.col_offset,
+                self._cur_env,
+                # Using __dict__.get() is faster than getattr()
+                node.__dict__.get("_target"),
+            )
+        )
 
     def _visit_arg(self, node):
         """Visit function argument."""
@@ -165,6 +179,15 @@ class Visitor:
             self.visit(child)
         del node.orelse
 
+    def _visit_match(self, node):
+        """Visit try-except."""
+        self.visit(node.subject)
+        del node.subject
+        for case in node.cases:
+            for stmt in case.body:
+                self.visit(stmt)
+        del node.cases
+
     def _visit_except(self, node):
         """Visit except branch."""
         if node.name is None:
@@ -174,16 +197,18 @@ class Visitor:
         # tokenize.
         line_idx = node.lineno - 1
         tokens = tokenize_lines(self._lines[i] for i in count(line_idx))
-        advance(tokens, 'as')
+        advance(tokens, "as")
         token = advance(tokens)
         lineno = token.start[0] + line_idx
         cur_line = self._lines[lineno - 1]
-        self.nodes.append(Node(
-            node.name,
-            lineno,
-            len(cur_line[:token.start[1]].encode('utf-8')),
-            self._cur_env,
-        ))
+        self.nodes.append(
+            Node(
+                node.name,
+                lineno,
+                len(cur_line[: token.start[1]].encode("utf-8")),
+                self._cur_env,
+            )
+        )
 
     def _visit_comp(self, node):
         """Visit set/dict/list comprehension or generator expression."""
@@ -234,55 +259,60 @@ class Visitor:
         name = node.names[0].name
         asname = node.names[0].asname
         target = asname or name
-        if target != '*' and '.' not in target:
-            guess = 'import ' + name + (' as ' + asname if asname else '')
-            if type(node) == ImportFrom:
-                guess = 'from ' + (node.module or node.level * '.') + ' ' + \
-                        guess
+        if target != "*" and "." not in target:
+            guess = "import " + name + (" as " + asname if asname else "")
+            if isinstance(node, ImportFrom):
+                guess = "from " + \
+                    (node.module or node.level * ".") + " " + guess
             if self._lines[line_idx] == guess:
-                self.nodes.append(Node(
-                    target,
-                    node.lineno,
-                    len(guess.encode('utf-8')) - len(target.encode('utf-8')),
-                    self._cur_env,
-                    None,
-                    IMPORTED,
-                ))
+                self.nodes.append(
+                    Node(
+                        target,
+                        node.lineno,
+                        len(guess.encode("utf-8")) -
+                        len(target.encode("utf-8")),
+                        self._cur_env,
+                        None,
+                        IMPORTED,
+                    )
+                )
                 return
         # Guessing the line failed, so we need to use the tokenizer
         tokens = tokenize_lines(self._lines[i] for i in count(line_idx))
         while True:
             # Advance to next "import" keyword
-            token = advance(tokens, 'import')
+            token = advance(tokens, "import")
             cur_line = self._lines[line_idx + token.start[0] - 1]
             # Determine exact byte offset. token.start[1] just holds the char
             # index which may give a wrong position.
-            offset = len(cur_line[:token.start[1]].encode('utf-8'))
+            offset = len(cur_line[: token.start[1]].encode("utf-8"))
             # ...until we found the matching one.
             if offset >= node.col_offset:
                 break
         for alias, more in zip(node.names, count(1 - len(node.names))):
-            if alias.name == '*':
+            if alias.name == "*":
                 continue
             # If it's an "as" alias import...
             if alias.asname is not None:
                 # ...advance to "as" keyword.
-                advance(tokens, 'as')
+                advance(tokens, "as")
             token = advance(tokens)
             cur_line = self._lines[line_idx + token.start[0] - 1]
-            self.nodes.append(Node(
-                token.string,
-                token.start[0] + line_idx,
-                # Exact byte offset of the token
-                len(cur_line[:token.start[1]].encode('utf-8')),
-                self._cur_env,
-                None,
-                IMPORTED,
-            ))
+            self.nodes.append(
+                Node(
+                    token.string,
+                    token.start[0] + line_idx,
+                    # Exact byte offset of the token
+                    len(cur_line[: token.start[1]].encode("utf-8")),
+                    self._cur_env,
+                    None,
+                    IMPORTED,
+                )
+            )
             # If there are more imports in that import statement...
             if more:
                 # ...they must be comma-separated, so advance to next comma.
-                advance(tokens, ',', OP)
+                advance(tokens, ",", OP)
 
     def _visit_class_function_definition(self, node):
         """Visit class or function definition.
@@ -296,7 +326,7 @@ class Visitor:
         del node.decorator_list
         line_idx = node.lineno - 1
         # Guess offset of the name (length of the keyword + 1)
-        start = node.col_offset + (6 if type(node) is ClassDef else 4)
+        start = node.col_offset + (6 if isinstance(node, ClassDef) else 4)
         stop = start + len(node.name)
         # If the node has no decorators and its name appears directly after the
         # definition keyword, we found its position and don't need to tokenize.
@@ -305,7 +335,7 @@ class Visitor:
             column = start
         else:
             tokens = tokenize_lines(self._lines[i] for i in count(line_idx))
-            advance(tokens, ('class', 'def'))
+            advance(tokens, ("class", "def"))
             token = advance(tokens)
             lineno = token.start[0] + line_idx
             column = token.start[1]
@@ -314,18 +344,20 @@ class Visitor:
     def _visit_global_nonlocal(self, node, keyword):
         line_idx = node.lineno - 1
         line = self._lines[line_idx]
-        indent = line[:-len(line.lstrip())]
-        if line == indent + keyword + ' ' + ', '.join(node.names):
+        indent = line[: -len(line.lstrip())]
+        if line == indent + keyword + " " + ", ".join(node.names):
             offset = len(indent) + len(keyword) + 1
             for name in node.names:
-                self.nodes.append(Node(
-                    name,
-                    node.lineno,
-                    offset,
-                    self._cur_env,
-                ))
+                self.nodes.append(
+                    Node(
+                        name,
+                        node.lineno,
+                        offset,
+                        self._cur_env,
+                    )
+                )
                 # Add 2 bytes for the comma and space
-                offset += len(name.encode('utf-8')) + 2
+                offset += len(name.encode("utf-8")) + 2
             return
         # Couldn't guess line, so we need to tokenize.
         tokens = tokenize_lines(self._lines[i] for i in count(line_idx))
@@ -334,16 +366,18 @@ class Visitor:
         for name, more in zip(node.names, count(1 - len(node.names))):
             token = advance(tokens)
             cur_line = self._lines[line_idx + token.start[0] - 1]
-            self.nodes.append(Node(
-                token.string,
-                token.start[0] + line_idx,
-                len(cur_line[:token.start[1]].encode('utf-8')),
-                self._cur_env,
-            ))
+            self.nodes.append(
+                Node(
+                    token.string,
+                    token.start[0] + line_idx,
+                    len(cur_line[: token.start[1]].encode("utf-8")),
+                    self._cur_env,
+                )
+            )
             # If there are more declared names...
             if more:
                 # ...advance to next comma.
-                advance(tokens, ',', OP)
+                advance(tokens, ",", OP)
 
     def _mark_self(self, node):
         """Mark self/cls argument if the current function has one.
@@ -359,10 +393,10 @@ class Visitor:
         except IndexError:
             return
         # ...with a special name...
-        if arg.arg not in ('self', 'cls'):
+        if arg.arg not in ("self", "cls"):
             return
         # ...and a class as parent scope is a self_param.
-        if not self._env[-1].get_type() == 'class':
+        if not self._env[-1].get_type() == "class":
             return
         # Let the table for the current function scope remember the param
         self._table_stack[-1].self_param = arg.arg
@@ -374,24 +408,24 @@ class Visitor:
         method (e.g. "self._name").
         """
         # Node must be an attribute of a name (foo.attr, but not [].attr)
-        if type(node.value) is not Name:
+        if not isinstance(node.value, Name):
             return
         target_name = node.value.id
         # Redundant, but may spare us the getattr() call in the next step
-        if target_name not in ('self', 'cls'):
+        if target_name not in ("self", "cls"):
             return
         # Only register attributes of self/cls parameter
-        if target_name != getattr(self._env[-1], 'self_param', None):
+        if target_name != getattr(self._env[-1], "self_param", None):
             return
         new_node = Node(
             node.attr,
             node.value.lineno,
             node.value.col_offset + len(target_name) + 1,
             self._env[:-1],
-            None, # target
+            None,  # target
             ATTRIBUTE,
         )
-        node.value._target = new_node # pylint: disable=protected-access
+        node.value._target = new_node  # pylint: disable=protected-access
         self.nodes.append(new_node)
 
     def _iter_node(self, node):
@@ -405,7 +439,7 @@ class Visitor:
             value_type = type(value)
             if value_type is list:
                 for item in value:
-                    if type(item) == str:
+                    if isinstance(item, str):
                         continue
                     self.visit(item)
             # We would want to use isinstance(value, AST) here. Not sure how
